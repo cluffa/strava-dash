@@ -1,16 +1,16 @@
+from datetime import datetime
+import logging
+import os
+import secrets
+import time
+from urllib.parse import urlencode, parse_qs
+
+import pandas as pd
+import plotly.express as px
 from dash import Dash, html, dcc
 from dash.dependencies import Input, Output, State
 from flask import request, session
-from stravalib import Client, unit_helper
-import os
-from urllib.parse import urlencode, parse_qs
-import logging
-import plotly.express as px
-import plotly.graph_objects as go
-import pandas as pd
-from datetime import datetime, timedelta
-import secrets
-import time
+from stravalib import Client
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Initialize the Dash app with session support
 app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server  # Expose Flask server for config
-server.secret_key = os.environ.get('SECRET_KEY', 'default-secret-key')  # Add this line
+server = app.server
+server.secret_key = os.environ.get('SECRET_KEY', 'default-secret-key')
 
 # Load config from environment
 server.config['STRAVA_CLIENT_ID'] = os.environ.get('STRAVA_CLIENT_ID')
@@ -32,6 +32,7 @@ app.layout = html.Div([
 ])
 
 def login_layout():
+    """Generate the login page layout."""
     client = Client()
     # Generate a unique state token and store it in session
     state = secrets.token_urlsafe(32)
@@ -54,6 +55,7 @@ def login_layout():
     ])
 
 def dashboard_layout(client):
+    """Generate the dashboard layout with activity data."""
     # Fetch recent activities and show raw data
     activities = list(client.get_activities(limit=30))
     
@@ -113,6 +115,7 @@ def dashboard_layout(client):
     ])
 
 def refresh_token_if_needed():
+    """Check and refresh the Strava token if expired."""
     if 'expires_at' not in session or not session.get('refresh_token'):
         return False
         
@@ -136,11 +139,12 @@ def refresh_token_if_needed():
 
 @app.callback(
     Output('page-content', 'children'),
-    Input('url', 'pathname'),
-    Input('url', 'search')
+    [Input('url', 'pathname'),
+     Input('url', 'search')]
 )
 def display_page(pathname, search):
-    logger.debug(f"Pathname: {pathname}, Search: {search}")
+    """Handle page routing and display appropriate content."""
+    logger.debug("Page requested - Path: %s, Search: %s", pathname, search)
     
     # Check if we have a valid session and try to refresh token
     if pathname != '/' and 'access_token' in session:
@@ -150,68 +154,68 @@ def display_page(pathname, search):
     if pathname == '/':
         return login_layout()
     elif pathname == '/strava-oauth':
-        # Parse the query string
-        query_params = parse_qs(search.lstrip('?'))
-        logger.debug(f"Query params: {query_params}")
-        
-        error = query_params.get('error', [None])[0]
-        if error:
-            return html.Div([
-                html.H2('Login Error'),
-                html.P(f'Error: {error}'),
-                html.A('Try Again', href='/', className='strava-button')
-            ])
-        
-        code = query_params.get('code', [None])[0]
-        received_state = query_params.get('state', [None])[0]
-        
-        # Verify state to prevent CSRF
-        if not received_state or received_state != session.get('oauth_state'):
-            return html.Div([
-                html.H2('Security Error'),
-                html.P('Invalid state parameter'),
-                html.A('Try Again', href='/', className='strava-button')
-            ])
-        
-        if not code:
-            return html.Div([
-                html.H2('Authentication Error'),
-                html.P('No authorization code received'),
-                html.A('Try Again', href='/', className='strava-button')
-            ])
-            
-        logger.debug(f"Received code: {code}")
-        client = Client()
-        
         try:
-            token_response = client.exchange_code_for_token(
-                client_id=server.config['STRAVA_CLIENT_ID'],
-                client_secret=server.config['STRAVA_CLIENT_SECRET'],
-                code=code
-            )
-            logger.debug(f"Token response: {token_response}")
-            
-            # Store tokens in session
-            session['access_token'] = token_response['access_token']
-            session['refresh_token'] = token_response['refresh_token']
-            session['expires_at'] = token_response['expires_at']
-            
-            # Set up client with access token
-            client.access_token = session['access_token']
-            
-            # Return dashboard instead of welcome message
-            return dashboard_layout(client)
-        except Exception as e:
-            import traceback
-            logger.error(f"Authentication error: {e}")
+            return handle_oauth_callback(search)
+        except Exception as exc:
+            logger.exception("OAuth callback error")
             return html.Div([
                 html.H2('Authentication Error'),
                 html.P('Failed to authenticate with Strava. Please try again.'),
-                html.Pre(str(e)),
+                html.Pre(str(exc)),
                 html.A('Try Again', href='/', className='strava-button')
             ])
     
-    return '404'
+    return html.Div([
+        html.H2('404 - Page Not Found'),
+        html.A('Go Home', href='/', className='strava-button')
+    ])
+
+def handle_oauth_callback(search):
+    """Process OAuth callback and return appropriate response."""
+    query_params = parse_qs(search.lstrip('?'))
+    logger.debug("OAuth callback params: %s", query_params)
+    
+    error = query_params.get('error', [None])[0]
+    if error:
+        return html.Div([
+            html.H2('Login Error'),
+            html.P(f'Error: {error}'),
+            html.A('Try Again', href='/', className='strava-button')
+        ])
+    
+    code = query_params.get('code', [None])[0]
+    received_state = query_params.get('state', [None])[0]
+    
+    if not received_state or received_state != session.get('oauth_state'):
+        return html.Div([
+            html.H2('Security Error'),
+            html.P('Invalid state parameter'),
+            html.A('Try Again', href='/', className='strava-button')
+        ])
+    
+    if not code:
+        return html.Div([
+            html.H2('Authentication Error'),
+            html.P('No authorization code received'),
+            html.A('Try Again', href='/', className='strava-button')
+        ])
+    
+    client = Client()
+    token_response = client.exchange_code_for_token(
+        client_id=server.config['STRAVA_CLIENT_ID'],
+        client_secret=server.config['STRAVA_CLIENT_SECRET'],
+        code=code
+    )
+    
+    # Store tokens in session
+    session['access_token'] = token_response['access_token']
+    session['refresh_token'] = token_response['refresh_token']
+    session['expires_at'] = token_response['expires_at']
+    
+    # Set up client with access token
+    client.access_token = session['access_token']
+    
+    return dashboard_layout(client)
 
 if __name__ == '__main__':
     app.run_server(debug=True)
